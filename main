@@ -1,0 +1,146 @@
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <BleKeyboard.h>
+
+// BRACE  - Gesture Based Controller
+// Board: ESP32 Dev Module (ESP32-WROOM-32)
+// Sensor: MPU6050 (GY-521)
+// Gesture: Wrist swipe left/right using gyro Z
+// Output: Bluetooth HID keyboard
+// Default mapping: Right swipe -> Right Arrow (next slide)
+//                  Left swipe  -> Left Arrow  (prev slide)
+
+// -Bluetooth device name
+BleKeyboard kb("BRACE",, 100);
+
+// -MPU6050
+Adafruit_MPU6050 mpu;
+
+// -Pins
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
+
+const bool USE_BUTTON = true;     // set false if no button
+const int  BTN_PIN = 27;          // button to GND
+
+// -Gesture tuning
+const float SWIPE_THRESH_DPS = 180.0;    // tune 120..300
+const unsigned long COOLDOWN_MS = 650;   // prevent double triggers
+unsigned long lastTrig = 0;
+
+// Baseline (neutral wrist position)
+float base_gz = 0.0;
+
+// Convert rad/s -> deg/s
+static inline float radToDeg(float r) { return r * (180.0 / 3.1415926f); }
+
+// Average gyroZ for baseline
+void calibrateNeutral(int samples = 300) {
+  sensors_event_t a, g, t;
+  float sum = 0.0;
+
+  for (int i = 0; i < samples; i++) {
+    mpu.getEvent(&a, &g, &t);
+    sum += g.gyro.z;
+    delay(5);
+  }
+  base_gz = sum / samples;
+}
+
+// Optional: re-calibrate by holding still and pressing button long
+bool longPressDetected() {
+  static unsigned long pressStart = 0;
+  if (!USE_BUTTON) return false;
+
+  if (digitalRead(BTN_PIN) == LOW) {
+    if (pressStart == 0) pressStart = millis();
+    if (millis() - pressStart > 1200) { // 1.2 sec
+      pressStart = 0;
+      return true;
+    }
+  } else {
+    pressStart = 0;
+  }
+  return false;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  if (!mpu.begin()) {
+    Serial.println("MPU6050 not found. Check wiring!");
+    while (true) delay(100);
+  }
+
+  // Stable settings for gestures
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  if (USE_BUTTON) pinMode(BTN_PIN, INPUT_PULLUP);
+
+  Serial.println("Hold BRACE still... calibrating neutral position.");
+  delay(800);
+  calibrateNeutral();
+  Serial.println("Calibration done.");
+
+  kb.begin();
+  Serial.println("Bluetooth started. Pair device: BRACE");
+  Serial.println("Tip: Swipe wrist left/right to change slides.");
+  if (USE_BUTTON) Serial.println("Button: short press = Play/Pause, long press = Recalibrate");
+}
+
+void loop() {
+  sensors_event_t a, g, t;
+  mpu.getEvent(&a, &g, &t);
+
+  // delta gyro Z relative to baseline
+  float dgz_dps = radToDeg(g.gyro.z - base_gz);
+
+  unsigned long now = millis();
+  bool cooldown = (now - lastTrig) < COOLDOWN_MS;
+
+  // -Button actions
+  if (USE_BUTTON && kb.isConnected()) {
+    // Short press -> Play/Pause (can change to Enter or Click later)
+    static bool prev = true;
+    bool cur = digitalRead(BTN_PIN);
+
+    if (prev == true && cur == false && (now - lastTrig) > 250) {
+      Serial.println("BUTTON -> PLAY/PAUSE");
+      kb.write(KEY_MEDIA_PLAY_PAUSE);
+      lastTrig = now;
+    }
+    prev = cur;
+
+    // Long press -> recalibrate neutral
+    if (longPressDetected()) {
+      Serial.println("Recalibrating... keep wrist still");
+      delay(300);
+      calibrateNeutral();
+      Serial.println("Recalibrated.");
+      lastTrig = millis();
+    }
+  }
+
+  // -Swipe gestures
+  if (kb.isConnected() && !cooldown) {
+    if (dgz_dps > SWIPE_THRESH_DPS) {
+      // RIGHT swipe -> Next slide
+      Serial.println("RIGHT -> Next slide (Right Arrow)");
+      kb.write(KEY_RIGHT_ARROW);
+      lastTrig = now;
+    } else if (dgz_dps < -SWIPE_THRESH_DPS) {
+      // LEFT swipe -> Previous slide
+      Serial.println("LEFT -> Previous slide (Left Arrow)");
+      kb.write(KEY_LEFT_ARROW);
+      lastTrig = now;
+    }
+  }
+
+  delay(10); // ~100 Hz
+}
