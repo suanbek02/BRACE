@@ -30,7 +30,6 @@ Button (optional):
 - One leg → GND
 - Other leg → GPIO 27 (INPUT_PULLUP)
 
-Add your wiring image here: `wiring_diagram.png`
 
 ## Software Setup
 **Arduino IDE 2.x**
